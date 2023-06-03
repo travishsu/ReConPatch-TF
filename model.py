@@ -35,9 +35,10 @@ class ContextualSimilarity(layers.Layer):
 
 
 class ReConPatch(keras.Model):
-    def __init__(self, input_dim, embedding_dim, projection_dim, alpha):
+    def __init__(self, input_dim, embedding_dim, projection_dim, alpha, margin=0.1):
         super(ReConPatch, self).__init__()
         self.alpha = alpha
+        self.margin = margin
 
         # embedding & projection layers
         self.embedding = layers.Dense(embedding_dim)
@@ -70,10 +71,24 @@ class ReConPatch(keras.Model):
         return self.embedding(x)
 
     def train_step(self, x):
+        B, _ = x.shape
+
         h_ema = self.ema_embedding(x)
         z_ema = self.ema_projection(h_ema)
 
         p_sim = self.pairwise_similarity(z_ema)
         c_sim = self.contextual_similarity(z_ema)
+        w = self.alpha * p_sim + (1 - self.alpha) * c_sim
 
-        #
+        with tf.GradientTape() as tape:
+            h = self.embedding(x)
+            z = self.projection(h)
+
+            # Contrastive loss
+            distances = tf.sqrt(l2_distance(z))
+            delta = B * distances / tf.reduce_sum(distances, axis=-1, keepdims=True)
+            rc_loss = tf.reduce_mean(w * delta ** 2) + \
+                tf.reduce_mean((1 - w) * tf.nn.relu(self.margin - delta) ** 2)
+            self.add_loss(rc_loss, name='rc_loss')
+
+        return rc_loss
