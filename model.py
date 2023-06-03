@@ -87,8 +87,8 @@ class ReConPatch(keras.Model):
             # Contrastive loss
             distances = tf.sqrt(l2_distance(z))
             delta = B * distances / tf.reduce_sum(distances, axis=-1, keepdims=True)
-            rc_loss = tf.reduce_mean(w * delta ** 2) + \
-                tf.reduce_mean((1 - w) * tf.nn.relu(self.margin - delta) ** 2) / B
+            rc_loss = (tf.reduce_mean(w * delta ** 2) + \
+                tf.reduce_mean((1 - w) * tf.nn.relu(self.margin - delta) ** 2)) / B
             self.add_loss(rc_loss, name='rc_loss')
 
         return rc_loss
