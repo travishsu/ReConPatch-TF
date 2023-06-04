@@ -56,13 +56,7 @@ class ReConPatch(keras.Model):
 
         # ema operator
         self.ema = tf.train.ExponentialMovingAverage(decay=0.9)
-        self.ema.apply(self.embedding.weights + self.projection.weights)
-
-        avg_emb_w, avg_emb_b = self.ema.average(self.embedding.weights[0]), self.ema.average(self.embedding.weights[1])
-        avg_proj_w, avg_proj_b = self.ema.average(self.projection.weights[0]), self.ema.average(self.projection.weights[1])
-
-        self.ema_embedding.set_weights([avg_emb_w, avg_emb_b])
-        self.ema_projection.set_weights([avg_proj_w, avg_proj_b])
+        self.update_ema()
 
         self.pairwise_similarity = PairwiseSimilarity(sigma=1.0)
         self.contextual_similarity = ContextualSimilarity(k=3)
@@ -87,8 +81,23 @@ class ReConPatch(keras.Model):
             # Contrastive loss
             distances = tf.sqrt(l2_distance(z))
             delta = B * distances / tf.reduce_sum(distances, axis=-1, keepdims=True)
-            rc_loss = (tf.reduce_sum(w * delta ** 2) + \
-                tf.reduce_sum((1 - w) * tf.nn.relu(self.margin - delta) ** 2)) / B
-            self.add_loss(rc_loss, name='rc_loss')
+            rc_loss = (tf.reduce_sum(w * delta ** 2) + tf.reduce_sum((1 - w) * tf.nn.relu(self.margin - delta) ** 2)) / B
 
-        return rc_loss
+        # Compute gradients
+        trainable_vars = self.embedding.trainable_variables + self.projection.trainable_variables
+        gradients = tape.gradient(rc_loss, trainable_vars)
+        # Update weights
+        self.optimizer.apply_gradients(zip(gradients, trainable_vars))
+        # Update EMA
+        self.update_ema()
+
+        return {"rc_loss": rc_loss}
+
+    def update_ema(self):
+        self.ema.apply(self.embedding.weights + self.projection.weights)
+
+        avg_emb_w, avg_emb_b = self.ema.average(self.embedding.weights[0]), self.ema.average(self.embedding.weights[1])
+        avg_proj_w, avg_proj_b = self.ema.average(self.projection.weights[0]), self.ema.average(self.projection.weights[1])
+
+        self.ema_embedding.set_weights([avg_emb_w, avg_emb_b])
+        self.ema_projection.set_weights([avg_proj_w, avg_proj_b])
