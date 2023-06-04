@@ -45,8 +45,8 @@ class ReConPatch(keras.Model):
         self.projection = layers.Dense(projection_dim)
 
         # ema ver of embedding & projection layers
-        self.ema_embedding = layers.Dense(embedding_dim)
-        self.ema_projection = layers.Dense(projection_dim)
+        self.ema_embedding = layers.Dense(embedding_dim, trainable=False)
+        self.ema_projection = layers.Dense(projection_dim, trainable=False)
 
         # initialize layers
         self.embedding.build((None, input_dim))
@@ -79,7 +79,7 @@ class ReConPatch(keras.Model):
             z = self.projection(h)
 
             # Contrastive loss
-            distances = tf.sqrt(l2_distance(z))
+            distances = tf.sqrt(l2_distance(z) + 1e-9)
             delta = B * distances / tf.reduce_sum(distances, axis=-1, keepdims=True)
             rc_loss = (tf.reduce_sum(w * delta ** 2) + tf.reduce_sum((1 - w) * tf.nn.relu(self.margin - delta) ** 2)) / B
 
