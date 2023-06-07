@@ -65,8 +65,6 @@ class ReConPatch(keras.Model):
         return self.embedding(x)
 
     def train_step(self, x):
-        B, _ = x.shape
-
         h_ema = self.ema_embedding(x)
         z_ema = self.ema_projection(h_ema)
 
@@ -80,12 +78,11 @@ class ReConPatch(keras.Model):
 
             # Contrastive loss
             distances = tf.sqrt(l2_distance(z) + 1e-9)
-            delta = B * distances / tf.reduce_sum(distances, axis=-1, keepdims=True)
-            rc_loss = (tf.reduce_sum(w * delta ** 2) + tf.reduce_sum((1 - w) * tf.nn.relu(self.margin - delta) ** 2)) / B
-
-        # Compute gradients
-        trainable_vars = self.embedding.trainable_variables + self.projection.trainable_variables
-        gradients = tape.gradient(rc_loss, trainable_vars)
+            delta = distances / tf.reduce_mean(distances, axis=-1, keepdims=True)
+            rc_loss = tf.reduce_sum(tf.reduce_mean(
+                w * (delta ** 2) + (1 - w) * (tf.nn.relu(self.margin - delta) ** 2),
+                axis=-1
+            ))
         # Update weights
         self.optimizer.apply_gradients(zip(gradients, trainable_vars))
         # Update EMA
