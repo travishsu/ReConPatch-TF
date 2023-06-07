@@ -84,7 +84,7 @@ class ReConPatch(keras.Model):
                 axis=-1
             ))
         # Update weights
-        self.optimizer.apply_gradients(zip(gradients, trainable_vars))
+        self.optimizer.minimize(rc_loss, self.trainable_variables, tape=tape)
         # Update EMA
         self.update_ema()
 
