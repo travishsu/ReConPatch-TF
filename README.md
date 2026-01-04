@@ -1,1 +1,1 @@
-# WIP: Unofficial (Tensorflow 2.x) Implementation of ReConPatch
+# WIP: Unofficial (PyTorch) Implementation of ReConPatch

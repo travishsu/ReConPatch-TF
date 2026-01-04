@@ -1,2 +1,2 @@
 numpy
-tensorflow >= 2.4
+torch >= 2.0.0

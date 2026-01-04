@@ -1,100 +1,125 @@
 # type: ignore
-import tensorflow as tf
-import tensorflow.keras as keras
-from tensorflow.keras import layers
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 
 def l2_distance(z):
-    diff = tf.expand_dims(z, axis=1) - tf.expand_dims(z, axis=0)
-    return tf.reduce_sum(diff ** 2, axis=-1)
+    """Compute pairwise L2 distances between embeddings."""
+    diff = z.unsqueeze(1) - z.unsqueeze(0)
+    return torch.sum(diff ** 2, dim=-1)
 
 
-class PairwiseSimilarity(layers.Layer):
+class PairwiseSimilarity(nn.Module):
     def __init__(self, sigma=1.0):
         super(PairwiseSimilarity, self).__init__()
         self.sigma = sigma
 
-    def call(self, z):
-        return tf.exp(-l2_distance(z) / self.sigma)
+    def forward(self, z):
+        return torch.exp(-l2_distance(z) / self.sigma)
 
 
-class ContextualSimilarity(layers.Layer):
+class ContextualSimilarity(nn.Module):
     def __init__(self, k):
         super(ContextualSimilarity, self).__init__()
         self.k = k
 
-    def call(self, z):
+    def forward(self, z):
         distances = l2_distance(z)
-        kth_nearst = -tf.math.top_k(-distances, k=self.k, sorted=True)[0][:, -1]
-        mask = tf.cast(distances <= tf.expand_dims(kth_nearst, axis=-1), tf.float32)
+        # Get k-th nearest neighbor distances (using negative for top_k)
+        kth_nearest = torch.topk(-distances, k=self.k, dim=-1, sorted=True)[0][:, -1]
+        mask = (distances <= kth_nearest.unsqueeze(-1)).float()
 
-        similarity = tf.matmul(mask, mask, transpose_b=True) / tf.reduce_sum(mask, axis=-1, keepdims=True)
-        R = mask * tf.transpose(mask)
-        similarity = tf.matmul(similarity, R, transpose_b=True) / tf.reduce_sum(R, axis=-1, keepdims=True)
-        return 0.5 * (similarity + tf.transpose(similarity))
+        similarity = torch.matmul(mask, mask.t()) / torch.sum(mask, dim=-1, keepdim=True)
+        R = mask * mask.t()
+        similarity = torch.matmul(similarity, R.t()) / torch.sum(R, dim=-1, keepdim=True)
+        return 0.5 * (similarity + similarity.t())
 
 
-class ReConPatch(keras.Model):
-    def __init__(self, input_dim, embedding_dim, projection_dim, alpha, margin=0.1):
+class ReConPatch(nn.Module):
+    def __init__(self, input_dim, embedding_dim, projection_dim, alpha, margin=0.1, ema_decay=0.9):
         super(ReConPatch, self).__init__()
         self.alpha = alpha
         self.margin = margin
+        self.ema_decay = ema_decay
 
-        # embedding & projection layers
-        self.embedding = layers.Dense(embedding_dim)
-        self.projection = layers.Dense(projection_dim)
+        # Embedding & projection layers
+        self.embedding = nn.Linear(input_dim, embedding_dim)
+        self.projection = nn.Linear(embedding_dim, projection_dim)
 
-        # ema ver of embedding & projection layers
-        self.ema_embedding = layers.Dense(embedding_dim, trainable=False)
-        self.ema_projection = layers.Dense(projection_dim, trainable=False)
+        # EMA versions of embedding & projection layers
+        self.ema_embedding = nn.Linear(input_dim, embedding_dim)
+        self.ema_projection = nn.Linear(embedding_dim, projection_dim)
 
-        # initialize layers
-        self.embedding.build((None, input_dim))
-        self.projection.build((None, embedding_dim))
-        self.ema_embedding.build((None, input_dim))
-        self.ema_projection.build((None, embedding_dim))
+        # Disable gradients for EMA layers
+        for param in self.ema_embedding.parameters():
+            param.requires_grad = False
+        for param in self.ema_projection.parameters():
+            param.requires_grad = False
 
-        # ema operator
-        self.ema = tf.train.ExponentialMovingAverage(decay=0.9)
-        self.update_ema()
+        # Initialize EMA layers with same weights
+        self.update_ema(init=True)
 
         self.pairwise_similarity = PairwiseSimilarity(sigma=1.0)
         self.contextual_similarity = ContextualSimilarity(k=3)
 
-    def call(self, x):
+    def forward(self, x):
         return self.embedding(x)
 
-    def train_step(self, x):
-        h_ema = self.ema_embedding(x)
-        z_ema = self.ema_projection(h_ema)
+    def train_step(self, x, optimizer):
+        """
+        Perform a single training step.
 
-        p_sim = self.pairwise_similarity(z_ema)
-        c_sim = self.contextual_similarity(z_ema)
-        w = self.alpha * p_sim + (1 - self.alpha) * c_sim
+        Args:
+            x: Input tensor
+            optimizer: PyTorch optimizer
 
-        with tf.GradientTape() as tape:
-            h = self.embedding(x)
-            z = self.projection(h)
+        Returns:
+            Dictionary containing the loss value
+        """
+        # Forward pass through EMA networks (no gradient)
+        with torch.no_grad():
+            h_ema = self.ema_embedding(x)
+            z_ema = self.ema_projection(h_ema)
 
-            # Contrastive loss
-            distances = tf.sqrt(l2_distance(z) + 1e-9)
-            delta = distances / tf.reduce_mean(distances, axis=-1, keepdims=True)
-            rc_loss = tf.reduce_sum(tf.reduce_mean(
-                w * (delta ** 2) + (1 - w) * (tf.nn.relu(self.margin - delta) ** 2),
-                axis=-1
-            ))
+            p_sim = self.pairwise_similarity(z_ema)
+            c_sim = self.contextual_similarity(z_ema)
+            w = self.alpha * p_sim + (1 - self.alpha) * c_sim
+
+        # Forward pass through trainable networks
+        h = self.embedding(x)
+        z = self.projection(h)
+
+        # Contrastive loss
+        distances = torch.sqrt(l2_distance(z) + 1e-9)
+        delta = distances / torch.mean(distances, dim=-1, keepdim=True)
+        rc_loss = torch.sum(torch.mean(
+            w * (delta ** 2) + (1 - w) * (F.relu(self.margin - delta) ** 2),
+            dim=-1
+        ))
+
         # Update weights
-        self.optimizer.minimize(rc_loss, self.trainable_variables, tape=tape)
+        optimizer.zero_grad()
+        rc_loss.backward()
+        optimizer.step()
+
         # Update EMA
         self.update_ema()
 
-        return {"rc_loss": rc_loss}
+        return {"rc_loss": rc_loss.item()}
 
-    def update_ema(self):
-        self.ema.apply(self.embedding.weights + self.projection.weights)
-
-        avg_emb_w, avg_emb_b = self.ema.average(self.embedding.weights[0]), self.ema.average(self.embedding.weights[1])
-        avg_proj_w, avg_proj_b = self.ema.average(self.projection.weights[0]), self.ema.average(self.projection.weights[1])
-
-        self.ema_embedding.set_weights([avg_emb_w, avg_emb_b])
-        self.ema_projection.set_weights([avg_proj_w, avg_proj_b])
+    @torch.no_grad()
+    def update_ema(self, init=False):
+        """Update EMA weights using exponential moving average."""
+        if init:
+            # Initialize EMA weights with current weights
+            self.ema_embedding.weight.data.copy_(self.embedding.weight.data)
+            self.ema_embedding.bias.data.copy_(self.embedding.bias.data)
+            self.ema_projection.weight.data.copy_(self.projection.weight.data)
+            self.ema_projection.bias.data.copy_(self.projection.bias.data)
+        else:
+            # Update EMA weights
+            for ema_param, param in zip(self.ema_embedding.parameters(), self.embedding.parameters()):
+                ema_param.data.mul_(self.ema_decay).add_(param.data, alpha=1 - self.ema_decay)
+            for ema_param, param in zip(self.ema_projection.parameters(), self.projection.parameters()):
+                ema_param.data.mul_(self.ema_decay).add_(param.data, alpha=1 - self.ema_decay)
